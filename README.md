@@ -1,3 +1,4 @@
+[![Board Status](https://dev.azure.com/itsnational/ac3cfff1-1889-4bd6-a910-07a846e5cf02/ae173846-e1a3-491e-9990-145049389a91/_apis/work/boardbadge/53b2c7d7-f2b1-43a0-9d98-b2debfe37d5a)](https://dev.azure.com/itsnational/ac3cfff1-1889-4bd6-a910-07a846e5cf02/_boards/board/t/ae173846-e1a3-491e-9990-145049389a91/Microsoft.RequirementCategory)
 
  # <img src="https://github.com/Azure/azure-service-bus-emulator-installer/blob/main/azure-servicebus-emulator.svg" alt="Event-Hubs Logo" width="50">    Azure Service Bus Emulator Installer
 
