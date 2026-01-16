@@ -398,3 +398,6 @@ FodyWeavers.xsd
 *.sln.iml
 *.class
 [Tt]arget/
+
+# IntelliJ IDEA project files
+.idea/

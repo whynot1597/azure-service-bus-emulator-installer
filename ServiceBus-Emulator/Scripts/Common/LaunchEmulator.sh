@@ -114,11 +114,18 @@ if [[ "$COMPOSE_DOWN" != 'y' && "$COMPOSE_DOWN" != 'Y' ]]; then
         SQL_WAIT_INTERVAL=${SQL_WAIT_INTERVAL:-15}
     fi
 
+    if [ -z "$EMULATOR_HTTP_PORT" ]; then
+        read -p "Enter the emulator HTTP port for health-check and Management APIs [default: 5300]: " EMULATOR_HTTP_PORT
+        # Set default value if no input is provided
+        EMULATOR_HTTP_PORT=${EMULATOR_HTTP_PORT:-5300}
+    fi
+
     # Set EULA as env variable
     echo "EULA has been accepted. Proceeding with launching containers.."
     export ACCEPT_EULA=$ACCEPT_EULA
     export SQL_PASSWORD=$SQL_PASSWORD
     export SQL_WAIT_INTERVAL=$SQL_WAIT_INTERVAL
+    export EMULATOR_HTTP_PORT=$EMULATOR_HTTP_PORT
 fi
 
 # Set Config Path as env variable

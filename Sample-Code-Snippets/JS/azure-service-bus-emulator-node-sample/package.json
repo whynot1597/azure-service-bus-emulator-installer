@@ -1,6 +1,7 @@
 {
   "name": "azure-service-bus-emulator-node-sample",
   "version": "1.0.0",
+  "type": "module",
   "main": "sample-send-receive.js",
   "keywords": [],
   "scripts": {
@@ -9,7 +10,6 @@
   "license": "MIT",
   "description": "",
   "dependencies": {
-    "@azure/service-bus": "^7.9.5",
-    "azure-service-bus-emulator-node-sample": "file:"
+    "@azure/service-bus": "^7.9.5"
   }
 }

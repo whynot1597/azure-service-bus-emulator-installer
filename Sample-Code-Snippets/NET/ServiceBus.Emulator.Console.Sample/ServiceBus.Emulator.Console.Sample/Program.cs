@@ -1,36 +1,125 @@
-﻿using Azure.Messaging.ServiceBus;
+﻿using Azure.Core;
+using Azure.Messaging.ServiceBus;
+using Azure.Messaging.ServiceBus.Administration;
 using System.Text;
 
 internal class Program
 {
-    private static string _connectionString = "Endpoint=sb://127.0.0.1;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
+    private static string _connectionString = "";
+    private static string _adminApiConnectionString = "";
+    private static ServiceBusAdministrationClient _adminClient = default!;
+
+    const int numOfBatches = 3;
+    const int numOfMessagesPerBatch = 3;
 
     public static async Task Main(string[] args)
     {
         Console.WriteLine("Service Bus Emulator .NET Sample");
 
+        await WaitForServiceBusEmulatorToBeHealthy();
+
+        UpdateConnectionStringFromEnvironmentVariables();
+
+	    _adminClient = new ServiceBusAdministrationClient(_adminApiConnectionString);
+
         //Case 1 : Send and Receive from a Queue
         Console.WriteLine("Running Case 1: Send Receive from a Queue");
-        await PublishMessageToDefaultQueue();
-        await ConsumeMessageFromDefaultQueue();
+        await SendAndReceiveFromQueue();
 
         //Case 2: Send and Receive from a Topic
-        Console.WriteLine("Running Case 2: Send Receive from a Topic with 3 Subscription with varying correlation filters");
-        await PublishMessageToDefaultTopic();
-        await ConsumeMessageFromDefaultTopic();
-
+        Console.WriteLine("Running Case 2: Send Receive from a Topic with 4 Subscription with varying correlation filters");
+        await SendAndReceiveFromTopic();
 
         Console.WriteLine("Press enter key to exit.");
         Console.ReadLine();  
     }
 
-    public static async Task PublishMessageToDefaultQueue() 
+    private static async Task WaitForServiceBusEmulatorToBeHealthy()
     {
-        const int numOfMessagesPerBatch = 10;
-        const int numOfBatches = 10;
+        Console.WriteLine($"Waiting for Service Bus Emulator to be healthy...");
+        string hostName = Environment.GetEnvironmentVariable("EMULATOR_HOST") ?? "localhost";
+        string port = Environment.GetEnvironmentVariable("EMULATOR_HTTP_PORT") ?? "5300";
+        string healthUrl = $"http://{hostName}:{port}/health";
 
-        string queueName = "queue.1";
+        using (var httpClient = new HttpClient())
+        {
+            while (true)
+            {
+                // HTTP GET on http://EMULATOR_HOST:EMULATOR_HTTP_PORT/health should return 200 OK when the emulator is healthy
+                try
+                {
+                    var response = await httpClient.GetAsync(healthUrl);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine("Service Bus Emulator is healthy.");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Ignore exceptions and continue waiting
+                    Console.WriteLine($"Service Bus Emulator is not healthy yet. Continuing to wait...{ex.Message}");
+                }
+                await Task.Delay(TimeSpan.FromSeconds(1));
+            }
+        }
+    }
 
+    private static void UpdateConnectionStringFromEnvironmentVariables()
+    {
+        string hostName = Environment.GetEnvironmentVariable("EMULATOR_HOST") ?? "localhost";
+        string port = Environment.GetEnvironmentVariable("EMULATOR_HTTP_PORT") ?? "5300";
+
+        _connectionString = $"Endpoint=sb://{hostName};SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
+        _adminApiConnectionString = $"Endpoint=sb://{hostName}:{port};SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;";
+
+        if (port == "80")
+        {
+            _adminApiConnectionString = _connectionString;
+        }
+
+        Console.WriteLine($"Runtime ConnectionString: {_connectionString}");
+        Console.WriteLine($"Admin API ConnectionString: {_adminApiConnectionString}");
+    }
+
+    private static async Task SendAndReceiveFromQueue()
+    {
+        string queueName = $"queue-{Guid.NewGuid()}";
+        await CreateQueueAsync(queueName);
+
+        try
+        {
+            await PublishMessageToQueue(queueName);
+            await ConsumeMessageFromQueue(queueName);
+        }
+        finally
+        {
+            await DeleteQueueIfExistsAsync(queueName);
+        }
+    }
+
+    private static async Task SendAndReceiveFromTopic()
+    {
+        string topicName = $"topic-{Guid.NewGuid()}";
+        List<string> subscriptions = await CreateTopicSubscriptionAndRulesAsync(topicName);
+        if (subscriptions.Count == 0)
+        {
+            throw new InvalidOperationException($"No subscriptions were provisioned for topic '{topicName}'.");
+        }
+
+        try
+        {
+            await PublishMessageToTopic(topicName);
+            await ConsumeMessageFromTopic(topicName, subscriptions);
+        }
+        finally
+        {
+            await DeleteTopicHierarchyAsync(topicName, subscriptions);
+        }
+    }
+
+    public static async Task PublishMessageToQueue(string queueName = "queue.1") 
+    {
         var client = new ServiceBusClient(_connectionString);
         var sender = client.CreateSender(queueName);
 
@@ -51,10 +140,8 @@ internal class Program
         Console.WriteLine($"{numOfBatches} batches with {numOfMessagesPerBatch} messages per batch has been published to the queue.");
     }
 
-    public static async Task ConsumeMessageFromDefaultQueue()
+    public static async Task ConsumeMessageFromQueue(string queueName = "queue.1")
     {
-        string queueName = "queue.1";
-
         var client = new ServiceBusClient(_connectionString);
 
         ServiceBusReceiverOptions opt = new ServiceBusReceiverOptions
@@ -70,7 +157,7 @@ internal class Program
             if (message != null)
             {
                 // Process the message
-                Console.WriteLine($"Received message: {Encoding.UTF8.GetString(message.Body)}");
+                Console.WriteLine($"\tReceived message: {Encoding.UTF8.GetString(message.Body)}");
 
                 // Complete the message to remove it from the queue
                 await receiver.CompleteMessageAsync(message);
@@ -89,40 +176,44 @@ internal class Program
     }
 
 
-    public static async Task PublishMessageToDefaultTopic()
+    public static async Task PublishMessageToTopic(string topicName = "topic.1")
     {
-        var topicName = "topic.1";
-
         await using (var client = new ServiceBusClient(_connectionString))
         {
             ServiceBusSender sender = client.CreateSender(topicName);
+            int messageCount = 0;
 
-            //First 50 message will goto Subscription 1 and Subscription 3 as per set filters in Config.json
-            for (int i = 1; i <= 50; i++)
+            //First 10 message will goto Subscription 1 and Subscription 3 as per set filters in Config.json
+            for (; messageCount < numOfMessagesPerBatch; messageCount++)
             {
-                ServiceBusMessage message = new ServiceBusMessage(Encoding.UTF8.GetBytes($"Message number : {i}"))
+                ServiceBusMessage message = new ServiceBusMessage(Encoding.UTF8.GetBytes($"Message number : {messageCount}"))
                 {
-                    ContentType = "application/json"
+                    ContentType = "application/text",
+                    //CorrelationId = "id1",
+                    //Subject = "subject1",
+                    //MessageId = "msgid1",
+                    //ReplyTo = "someQueue",
+                    //ReplyToSessionId = "sessionId",
+                    //SessionId = "session1",
+                    //To = "xyz"
                 };
 
                 await sender.SendMessageAsync(message);
             }
 
-            //Next 50 message will goto Subscription 2 and Subscription 3 as per set filters  in Config.json
-
-            for (int i = 51; i <= 100; i++)
+            //Next 10 message will goto Subscription 2 and Subscription 3 as per set filters  in Config.json
+            for (; messageCount < numOfMessagesPerBatch * 2; messageCount++)
             {
-                ServiceBusMessage message = new ServiceBusMessage(Encoding.UTF8.GetBytes($"Message number : {i}"));
+                ServiceBusMessage message = new ServiceBusMessage(Encoding.UTF8.GetBytes($"Message number : {messageCount}"));
                 message.ApplicationProperties.Add("prop1", "value1");
 
                 await sender.SendMessageAsync(message);
             }
 
-            //Next 50 message will goto Subscription 3 and Subscription 4 as per set filters  in Config.json
-
-            for (int i = 101; i <= 150; i++)
+            //Next 10 message will goto Subscription 3 and Subscription 4 as per set filters  in Config.json
+            for (; messageCount < numOfMessagesPerBatch * 3; messageCount++)
             {
-                ServiceBusMessage message = new ServiceBusMessage(Encoding.UTF8.GetBytes($"Message number : {i}"))
+                ServiceBusMessage message = new ServiceBusMessage(Encoding.UTF8.GetBytes($"Message number : {messageCount}"))
                 {
                     MessageId = "123456"
                 };
@@ -130,18 +221,21 @@ internal class Program
 
                 await sender.SendMessageAsync(message);
             }
-        }
 
-        Console.WriteLine("Sent 100 messages to the topic.");
+            Console.WriteLine($"Sent {messageCount} messages to the topic: {topicName}");
+        }
     }
 
-    public static async Task ConsumeMessageFromDefaultTopic()
+    public static async Task ConsumeMessageFromTopic(string topicName = "topic.1", List<string>? subscriptions = null)
     {
-        var topicName = "topic.1";
-        await ConsumeMessageFromSubscription(topicName, "subscription.1");
-        await ConsumeMessageFromSubscription(topicName, "subscription.2");
-        await ConsumeMessageFromSubscription(topicName, "subscription.3");
-        await ConsumeMessageFromSubscription(topicName, "subscription.4");
+        if (subscriptions == null || subscriptions.Count == 0)
+        {
+            throw new ArgumentException("At least one subscription is required to consume topic messages.", nameof(subscriptions));
+        }
+        foreach (string subscription in subscriptions) {
+            Console.WriteLine($"Starting to receive messages from {subscription}");
+            await ConsumeMessageFromSubscription(topicName, subscription);
+        }
     }
 
     private static async Task ConsumeMessageFromSubscription(string topicName,string subscriptionName)
@@ -170,7 +264,7 @@ internal class Program
     private static async Task MessageHandler(ProcessMessageEventArgs args)
     {
         string body = args.Message.Body.ToString();
-        Console.WriteLine($"Received message: SequenceNumber:{args.Message.SequenceNumber} Body:{body} To:{args.Message.To}");
+        Console.WriteLine($"\tReceived message: SequenceNumber:{args.Message.SequenceNumber} Body:{body} To:{args.Message.To}");
         await args.CompleteMessageAsync(args.Message);
     }
 
@@ -178,6 +272,132 @@ internal class Program
     {
         Console.WriteLine($"Message handler encountered an exception {args.Exception}.");
         return Task.CompletedTask;
+    }
+
+    private static async Task CreateQueueAsync(string queueName)
+    {
+        await _adminClient.CreateQueueAsync(queueName);
+        Console.WriteLine($"Created queue '{queueName}'.");
+    }
+
+    private static async Task DeleteQueueIfExistsAsync(string queueName)
+    {
+        if (await _adminClient.QueueExistsAsync(queueName))
+        {
+            await _adminClient.DeleteQueueAsync(queueName);
+            Console.WriteLine($"Deleted queue '{queueName}'.");
+        }
+    }
+
+    private static async Task<List<string>> CreateTopicSubscriptionAndRulesAsync(string topicName)
+    {
+
+        var topicOptions = new CreateTopicOptions(topicName)
+        {
+            DefaultMessageTimeToLive = TimeSpan.FromHours(1),
+            DuplicateDetectionHistoryTimeWindow = TimeSpan.FromSeconds(20),
+            RequiresDuplicateDetection = false
+        };
+
+        await _adminClient.CreateTopicAsync(topicOptions);
+        Console.WriteLine($"Created topic '{topicName}'.");
+
+        var createdSubscriptions = new List<string>();
+
+        string subscription1 =$"sub-1-{Guid.NewGuid()}";
+        await CreateSubscriptionAsync(topicName, subscription1, CreateSubscription1Rule());
+        createdSubscriptions.Add(subscription1);
+
+        string subscription2 = $"sub-2-{Guid.NewGuid()}";
+        await CreateSubscriptionAsync(topicName, subscription2, CreateSubscription2Rule());
+        createdSubscriptions.Add(subscription2);
+
+        string subscription3 = $"sub-3-{Guid.NewGuid()}";
+        await CreateSubscriptionAsync(topicName, subscription3, null);
+        createdSubscriptions.Add(subscription3);
+
+        string subscription4 = $"sub-4-{Guid.NewGuid()}";
+        await CreateSubscriptionAsync(topicName, subscription4, CreateSubscription4Rule());
+        createdSubscriptions.Add(subscription4);
+
+        return createdSubscriptions;
+    }
+
+    private static async Task DeleteTopicHierarchyAsync(string topicName, IEnumerable<string> subscriptions)
+    {
+        if (!await _adminClient.TopicExistsAsync(topicName))
+        {
+            return;
+        }
+
+        foreach (string subscription in subscriptions)
+        {
+            if (await _adminClient.SubscriptionExistsAsync(topicName, subscription))
+            {
+                await _adminClient.DeleteSubscriptionAsync(topicName, subscription);
+                Console.WriteLine($"Deleted subscription '{subscription}'.");
+            }
+        }
+
+        await _adminClient.DeleteTopicAsync(topicName);
+        Console.WriteLine($"Deleted topic '{topicName}'.");
+    }
+
+    private static async Task CreateSubscriptionAsync(string topicName, string subscriptionName, CreateRuleOptions? ruleOptions)
+    {
+        var options = new CreateSubscriptionOptions(topicName, subscriptionName)
+        {
+            DeadLetteringOnMessageExpiration = false,
+            DefaultMessageTimeToLive = TimeSpan.FromHours(1),
+            LockDuration = TimeSpan.FromMinutes(1),
+            MaxDeliveryCount = 3,
+            RequiresSession = false
+        };
+
+        if (ruleOptions == null)
+        {
+            await _adminClient.CreateSubscriptionAsync(options);
+        }
+        else
+        {
+            await _adminClient.CreateSubscriptionAsync(options, ruleOptions);
+        }
+
+        Console.WriteLine($"Created subscription '{subscriptionName}'.");
+    }
+
+    private static CreateRuleOptions CreateSubscription1Rule()
+    {
+        var correlationFilter = new CorrelationRuleFilter
+        {
+            ContentType = "application/text",
+            //CorrelationId = "id1",
+            //Subject = "subject1",
+            //MessageId = "msgid1",
+            //ReplyTo = "someQueue",
+            //ReplyToSessionId = "sessionId",
+            //SessionId = "session1",
+            //To = "xyz"
+        };
+
+        return new CreateRuleOptions("app-prop-filter-1", correlationFilter);
+    }
+
+    private static CreateRuleOptions CreateSubscription2Rule()
+    {
+        var correlationFilter = new CorrelationRuleFilter();
+        correlationFilter.ApplicationProperties["prop1"] = "value1";
+        return new CreateRuleOptions("user-prop-filter-1", correlationFilter);
+    }
+
+    private static CreateRuleOptions CreateSubscription4Rule()
+    {
+        var sqlFilter = new SqlRuleFilter("sys.MessageId = '123456' AND userProp1 = 'value1'");
+        var sqlAction = new SqlRuleAction("SET sys.To = 'Entity'");
+        return new CreateRuleOptions("sql-filter-1", sqlFilter)
+        {
+            Action = sqlAction
+        };
     }
 
 }
